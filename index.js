@@ -1,6 +1,7 @@
 import express from 'express';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import dotenv from 'dotenv';
+import { startPolling } from './poller.js';
 
 dotenv.config();
 
@@ -87,6 +88,7 @@ app.use((req, res) => {
     res.status(404).send('Not Found');
 });
 
-app.listen(3000,() => {
+app.listen(3000, () => {
     console.log('SignalShelf server is running');
+    startPolling(resources);
 });
