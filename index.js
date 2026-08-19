@@ -1,9 +1,38 @@
 import express from 'express';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 const resources = {};
 
-app.use(express.json());
+const webhookSecret = process.env.WEBHOOK_SECRET;
+
+function verifyWebhookSignature(payload, signature) {
+    if (!signature || !webhookSecret) {
+        return false;
+    }
+
+    const expectedSignature = createHmac('sha256', webhookSecret)
+        .update(payload)
+        .digest('hex');
+
+    const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+    const receivedBuffer = Buffer.from(signature, 'utf8');
+
+    if (expectedBuffer.length !== receivedBuffer.length) {
+        return false;
+    }
+
+    return timingSafeEqual(expectedBuffer, receivedBuffer);
+}
+
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 
 app.get('/', (req, res) => {
     res.send('Hello SignalShelf');
@@ -11,7 +40,17 @@ app.get('/', (req, res) => {
 
 app.post('/webhooks/resource-update', (req, res) => {
     console.log('Webhook received');
+
+    const signature = req.headers['x-webhook-signature'];
+
+    if (!verifyWebhookSignature(req.rawBody, signature)) {
+        console.log('Invalid webhook signature');
+        return res.status(401).send('Invalid webhook signature');
+    }
+
+    console.log('Webhook signature verified');
     console.log('Request body:', req.body);
+
     const { event, resourceId, status } = req.body;
 
     if (
@@ -22,10 +61,10 @@ app.post('/webhooks/resource-update', (req, res) => {
         console.log('Invalid resource update received');
         return res.status(400).send('Invalid resource update');
     }
-    
-    console.log('Valid status update received');
 
     resources[resourceId] = status;
+
+    console.log('Valid status update received');
 
     res.status(200).send('Webhook received');
 });
