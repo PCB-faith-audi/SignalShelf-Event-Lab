@@ -11,7 +11,25 @@ export async function pollWarehouse(resources) {
         const data = await response.json();
 
         for (const resourceId in data) {
-            resources[resourceId] = data[resourceId];
+            const oldStatus = resources[resourceId];
+            const newStatus = data[resourceId];
+
+           if (oldStatus !== undefined && oldStatus !== newStatus) {
+            const event = {
+        event: 'resource.updated',
+        resourceId,
+        oldStatus,
+        newStatus
+    };
+
+    console.log(
+        `Change detected: ${resourceId}: ${oldStatus} → ${newStatus}`
+    );
+
+    console.log('Generated event:', event);
+}
+
+            resources[resourceId] = newStatus;
         }
 
         console.log('Warehouse polled successfully');
@@ -27,5 +45,5 @@ export function startPolling(resources) {
 
     setInterval(() => {
         pollWarehouse(resources);
-    }, 300000);
+    }, 10000);
 }

@@ -618,3 +618,111 @@ Actual result: `HTTP/1.1 200 OK` with `Webhook received`.
 Result: PASS.
 
 This confirmed that adding the warehouse polling functionality did not break the existing HMAC verification, validation, or resource update functionality.
+
+## Day 4 — Change Detection
+
+### Technical Concept Learned
+
+I learned how to detect changes between a previously cached value and a newly fetched value.
+
+The Day 3 poller copied warehouse data into the SignalShelf cache every time it polled. In Day 4, I changed the poller so it compares the previous cached status with the newly fetched warehouse status before updating the cache.
+
+The comparison follows this idea:
+
+old status → new status
+
+If the values are different, a change is detected.
+
+If the values are the same, no change is reported.
+
+### Initial State Behavior
+
+When SignalShelf starts for the first time, it does not have a previous value for a resource.
+
+For example:
+
+undefined → maintenance
+
+This is treated as the initial state rather than a detected change because there is no previous cached value to compare against.
+
+### Change Detection Experiment
+
+I first allowed SignalShelf to poll the warehouse and establish:
+
+room-101 = maintenance
+
+I then changed the warehouse value to:
+
+room-101 = available
+
+During the next polling cycle, SignalShelf detected:
+
+maintenance → available
+
+The application logged:
+
+`Change detected: room-101: maintenance → available`
+
+The SignalShelf cache was then updated to:
+
+`room-101: available`
+
+### Repeated Polling Test
+
+After the change was detected, subsequent polling cycles continued to retrieve the warehouse data.
+
+Because room-101 remained `available`, the application did not repeatedly report the same change.
+
+This demonstrated that the comparison is based on the previous state and the newly fetched state.
+
+### What I Learned
+
+I learned that polling does not have to blindly process every retrieved value. A polling system can compare the previous state with the current state and react only when a meaningful change occurs.
+
+This reduces unnecessary event processing and provides a bridge between polling-based synchronization and event-driven behavior.
+
+## Day 4 — Responsible Engineering Reflection
+
+### ETHOS
+
+I considered whether every polling result should automatically trigger processing. I chose to distinguish between unchanged data and actual state transitions so the system does not unnecessarily process identical information.
+
+### HORIZON
+
+I considered how this approach could behave as the system grows. A production system would need more robust change tracking, persistent state, monitoring, and possibly a dedicated event or message system.
+
+### TRACK
+
+I recorded the actual transition tested during development:
+
+`maintenance → available`
+
+I also documented the initial-state behavior and the repeated polling behavior.
+
+### OASIS
+
+The polling process provides observable logs showing successful synchronization and detected changes. This makes the system easier to monitor and troubleshoot.
+
+### PRIDE
+
+The change-detection logic is kept close to the synchronization process, making it easier to understand why a resource was updated.
+
+### TRAIL
+
+The Day 4 experiment is supported by terminal output, source-code changes, and this learning journal.
+
+### CYCLE
+
+I followed an iterative process: modify the poller, check syntax, run the system, change warehouse data, observe the polling result, and verify that the cache changed correctly.
+
+### RANK
+
+I prioritized correctness of state synchronization before adding more advanced event-processing features.
+
+### HUNT
+
+When the first experiment did not produce a change event, I investigated why. SignalShelf had started after the warehouse had already changed, so the warehouse value became the initial cached state. I then performed a second transition and successfully detected the change.
+
+### GUARD
+
+The system only reports a change when a previous cached value exists and the newly retrieved value differs from it. This helps prevent the initial state from being incorrectly treated as a state transition.
