@@ -912,14 +912,58 @@ The system must therefore:
 8. Stop retrying after a defined limit.
 9. Make failure visible rather than silently marking the attendee as checked in.
 
-## Current Limitation
+## Queue Architecture Update
 
-The current queue is an in-memory JavaScript queue. It demonstrates the asynchronous architecture but is not yet a durable production message broker.
+The original implementation used an in-memory JavaScript queue and mock printer vendor.
 
-The next architectural step is to evaluate replacing the in-memory queue with a real queue technology while preserving the existing API and webhook contract.
+That architecture was replaced with Redis + BullMQ.
+
+Redis now provides the external queue backing, while BullMQ manages job creation, worker processing, retries, backoff, completion, and failure states.
+
+The existing API and webhook contract were preserved during the migration.
+
+The current architecture is therefore:
+
+```text
+Check-in API
+    ↓
+BullMQ
+    ↓
+Redis
+    ↓
+BullMQ Worker
+    ↓
+HMAC-signed webhook
+    ↓
+Print completion endpoint
+    ↓
+CHECKED_IN
 
 ## Pivot Status
 
 The core Meridian Pivot requirements are implemented and demonstrated.
 
 The next phase is to harden the queue architecture, improve observability, and prepare the implementation for a final end-to-end demonstration.
+
+## Day 5 — Redis + BullMQ Async Queue
+
+### Pivot implementation
+
+The SignalShelf check-in backend was migrated from the earlier in-memory/vendor simulation to a Redis-backed asynchronous queue using BullMQ.
+
+New architecture:
+
+```text
+Check-in API
+    ↓
+BullMQ Queue
+    ↓
+Redis
+    ↓
+BullMQ Worker
+    ↓
+HMAC-signed webhook
+    ↓
+Print completion endpoint
+    ↓
+Attendee CHECKED_IN

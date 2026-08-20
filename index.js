@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'node:crypto';
 import dotenv from 'dotenv';
 import { attendees } from './attendees.js';
+import { addPrintJob } from './redis-queue.js';
 
 dotenv.config();
 
@@ -65,36 +66,23 @@ app.post('/check-in/:attendeeId', async (req, res) => {
     attendee.jobId = jobId;
 
     try {
-    const response = await fetch('http://localhost:4000/print-queue', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            jobId,
-            attendeeId
-        })
+    await addPrintJob({
+        jobId,
+        attendeeId
     });
+} catch (error) {
+    console.error(
+        'Failed to queue print job:',
+        error.message
+    );
 
-    if (!response.ok) {
-        attendee.status = 'NOT_CHECKED_IN';
-        attendee.jobId = null;
+    attendee.status = 'NOT_CHECKED_IN';
+    attendee.jobId = null;
 
-        return res.status(503).json({
-            error: 'Unable to publish print request'
-        });
-    }
-
-    } catch (error) {
-        console.error('Failed to contact printer vendor:', error.message);
-
-        attendee.status = 'NOT_CHECKED_IN';
-        attendee.jobId = null;
-
-        return res.status(503).json({
-            error: 'Printer vendor unavailable'
-        });
-    }
+    return res.status(503).json({
+        error: 'Unable to queue print request'
+    });
+}
 
     console.log(
         `Check-in request queued for ${attendeeId}. Job ID: ${jobId}`
