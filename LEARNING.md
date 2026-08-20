@@ -290,109 +290,59 @@ This is still a learning prototype rather than a production service. It uses in-
 
 The next phase will move from the independent prototype toward the Meridian Pivot system specification while preserving the lessons learned from webhook verification, validation, security, and debugging.
 
-## Day 3 — Original Architecture
+## Day 3 — Polling Architecture and Baseline
 
 ### Step 1: Mock Warehouse API
 
-I created a local mock warehouse service to simulate an external system that SignalShelf will query.
+I created a local mock warehouse service to simulate an external system that SignalShelf would query.
 
 The mock service runs on port 4000 and exposes:
 
 GET /warehouse/resources
 
-It currently returns three simulated resources:
+It returns three simulated resources:
 - room-101: available
 - room-102: occupied
 - room-103: maintenance
 
-### Why I Created It
-
-A real warehouse API is not available for this learning prototype, so I created a local service that behaves like an external warehouse API.
-
-This allows me to test the polling architecture without depending on a third-party service.
-
-### Architecture Decision
-
-SignalShelf runs on port 3000 while the mock warehouse runs on port 4000. Keeping them as separate services simulates the relationship between an application and an external inventory system.
-
-### Responsible Engineering
-
-I am clearly treating the warehouse as simulated data rather than representing it as a real production data source. The prototype also avoids storing sensitive personal information.
+This allowed me to test the polling architecture without depending on a third-party service.
 
 ### Step 2: Learning HTTP Fetching
 
-I learned how a Node.js application can communicate with another HTTP service using the built-in fetch function.
+I learned how a Node.js application can communicate with another HTTP service using the built-in `fetch` function.
 
-I created polling-lab.js to request data from the mock warehouse API running on port 4000.
+I created `polling-lab.js` to request data from the mock warehouse API running on port 4000.
 
 The request was:
 
 GET http://localhost:4000/warehouse/resources
 
-The warehouse returned JSON data containing the current resource statuses.
+The warehouse returned JSON containing the current resource statuses.
 
-I used async and await because the HTTP request is asynchronous and the application must wait for the warehouse response before processing the returned data.
-
-### Evidence
-
-The polling test successfully received:
-- room-101: available
-- room-102: occupied
-- room-103: maintenance
-
-### Learning
-
-I learned that an HTTP client can retrieve JSON from another service and convert that response into a JavaScript object that can be processed by the application.
-
-### Troubleshooting Note
-
-I initially treated the warehouse and SignalShelf as if they were the same application. I clarified the architecture by running the mock warehouse separately on port 4000 and using a separate Node.js script to request its data.
-
-This helped me understand that a service can act as an HTTP client while another service acts as an HTTP server.
+I used `async` and `await` because the HTTP request is asynchronous and the application must wait for the response before processing it.
 
 ### Step 3: Polling and Cache Refresh
 
-I extended the polling prototype so that it can repeatedly request the warehouse API and update the SignalShelf cache.
+I extended the prototype so that it could repeatedly request the warehouse API and update the SignalShelf cache.
 
-I first tested the polling interval using 10 seconds instead of 5 minutes. This allowed me to verify the repeated behavior without waiting several minutes between tests.
+I initially tested a shorter interval of 10 seconds during development so I could observe repeated polling without waiting several minutes. After confirming the behavior, I configured the production interval to 300000 milliseconds, which is five minutes.
 
-After confirming the behavior, I configured the interval to 300000 milliseconds, which represents five minutes.
+I also added response checking and error handling so a failed warehouse request is logged instead of being treated as valid inventory data.
 
-I also added response checking and error handling. The application checks whether the warehouse response was successful before processing it and catches polling errors so that a failed warehouse request can be logged instead of silently breaking the application.
+### Architecture and Integration
 
-### Engineering Reasoning
+The Day 3 architecture is:
 
-The shorter development interval was used only for testing. The final configured interval follows the original Day 3 specification of five-minute polling.
+Mock Warehouse API
+→ HTTP polling every five minutes
+→ SignalShelf cache
+→ GET /resources/:id
 
-### Reliability Consideration
+I separated the polling logic into `poller.js` so that warehouse communication was handled independently from Express route logic. I then imported the poller into `index.js` and started polling when the server started.
 
-The polling service depends on the warehouse being reachable. Error handling prevents an individual failed request from being treated as valid inventory data.
+The first request happens immediately to populate the cache, and subsequent requests continue on the configured interval.
 
-## Day 3 — Original Specification
-
-### Warehouse Integration
-
-I created a mock warehouse API running on port 4000. It exposes resource availability data through an HTTP GET endpoint.
-
-### Polling Prototype
-
-I created `polling-lab.js` to learn how SignalShelf could request warehouse data and update its local cache.
-
-I initially tested the polling interval at 10 seconds so I could observe repeated polling during development. After confirming that the mechanism worked, I configured the production prototype for the required five-minute interval.
-
-### Poller Module
-
-I separated the warehouse polling logic into `poller.js` rather than putting all functionality inside `index.js`.
-
-This helped separate the responsibility of communicating with the warehouse from the responsibility of handling Express routes.
-
-### SignalShelf Integration
-
-I imported the polling module into `index.js` and started the polling process when the Express server starts.
-
-The first warehouse request happens immediately so that the cache is populated when the application starts. Subsequent requests occur every five minutes.
-
-### Verification
+### Verification and Tests
 
 The SignalShelf API successfully returned:
 
@@ -402,222 +352,21 @@ The SignalShelf API successfully returned:
 
 I also tested a nonexistent resource and confirmed that the API returned HTTP 404.
 
-### Architecture
+I then simulated a resource change in the mock warehouse. After changing `room-101` from `available` to `occupied`, the warehouse API reflected the new value immediately, while SignalShelf updated the cache only after the next polling cycle.
 
-Mock Warehouse API
-→ Poller
-→ SignalShelf cache
-→ Resource query endpoint
+This demonstrated the core polling trade-off: synchronization is delayed by the polling interval, but the system remains simple and reliable.
 
-### Engineering Decision
+### Failure Handling
 
-I kept the polling functionality separated into its own module so that the system would be easier to change if the external integration method changed later.
+I tested the polling service while the mock warehouse API was unavailable. The request failed, the error was caught, and the SignalShelf process remained running instead of crashing.
 
-### Synchronization Test
+I observed repeated failed polling attempts while the warehouse was down, but the main server continued to operate. This verified that the polling service handles external failures gracefully.
 
-I added a development-only update endpoint to the mock warehouse so that I could simulate a resource status changing.
+### Day 3 Lessons Learned
 
-Initially:
+The polling approach is straightforward and easy to reason about, but it introduces data staleness and extra requests when data has not changed. A shorter polling interval reduces stale data but increases traffic; a longer interval reduces traffic but increases the chance of outdated information.
 
-- Warehouse room-101 = available
-- SignalShelf room-101 = available
-
-I then changed the warehouse state:
-
-- Warehouse room-101 = occupied
-
-The SignalShelf cache did not necessarily change immediately because the system uses polling rather than real-time updates.
-
-After the next polling cycle, the SignalShelf cache reflected the new warehouse state:
-
-- Warehouse room-101 = occupied
-- SignalShelf room-101 = occupied
-
-### Polling Trade-off
-
-This test demonstrated that polling introduces synchronization delay. A five-minute polling interval means that changes in the warehouse may not be visible to SignalShelf immediately.
-
-This limitation is important because it establishes a baseline for the architecture before the Day 4 pivot.
-
-### Synchronization Test
-
-I simulated a warehouse resource change using the mock warehouse API.
-
-Initial state:
-
-- room-101 = available
-
-I changed the warehouse state using the development update endpoint:
-
-- room-101 = occupied
-
-The warehouse API subsequently returned room-101 as occupied.
-
-SignalShelf then performed a polling cycle and updated its local cache:
-
-- room-101 = occupied
-- room-102 = occupied
-- room-103 = maintenance
-
-This confirmed that the polling architecture can synchronize SignalShelf's cached state with the warehouse.
-
-### Important Observation
-
-The system does not receive warehouse changes immediately. It discovers changes during polling cycles. This creates a synchronization delay and means the cached information can temporarily differ from the warehouse's current state.
-
-This limitation is an important architectural trade-off that will be relevant when evaluating the system's response to a future change in the integration method.
-
-### Failure Handling Test
-
-I tested the polling service with the mock warehouse unavailable.
-
-The warehouse service was stopped while SignalShelf was running. The polling request failed, but the error was caught and reported by the polling service.
-
-The SignalShelf process remained running instead of crashing.
-
-I temporarily reduced the polling interval during development so that I could observe the failure behavior without waiting five minutes. I restored the configured interval to five minutes after testing.
-
-### Result
-
-The failure-handling behavior worked as intended.
-
-This demonstrated that the polling service can detect and report an unavailable warehouse without terminating the main application.
-
-### Polling Failure Test
-
-I tested the polling service while the mock warehouse API was unavailable.
-
-The SignalShelf server started successfully, but the polling requests failed with:
-
-`Polling failed: fetch failed`
-
-The error was caught by the polling service instead of terminating the application.
-
-I observed multiple failed polling attempts while the warehouse remained unavailable.
-
-### Result
-
-The failure-handling test passed. The main SignalShelf process remained running while the polling failure was reported.
-
-For testing purposes, I temporarily used a shorter polling interval so that I could observe repeated failures without waiting five minutes. I restored the final configuration to the required five-minute polling interval after the test.
-
-### Day 3 Architectural Baseline
-
-The completed Day 3 architecture is:
-
-Mock Warehouse API
-→ HTTP polling every five minutes
-→ SignalShelf cache
-→ Resource query endpoint
-
-The architecture provides periodic synchronization but introduces synchronization delay because changes are only discovered during polling cycles.
-
-## Day 3 — Original Specification
-
-### Original Requirement
-
-The system must poll a warehouse API every five minutes, cache the returned resource availability data, and expose an endpoint that allows clients to query the cached status.
-
-### Architecture
-
-The Day 3 architecture consists of:
-
-1. A mock warehouse API running on port 4000.
-2. A polling module that requests warehouse data.
-3. An in-memory SignalShelf cache.
-4. A resource query endpoint on the SignalShelf Express server.
-
-The data flow is:
-
-Mock Warehouse API
-→ HTTP polling
-→ SignalShelf cache
-→ GET /resources/:id
-
-### Polling Implementation
-
-The polling interval is configured as 300000 milliseconds, which is five minutes.
-
-The poller performs an immediate initial request when the application starts and then continues polling at the required interval.
-
-### Error Handling
-
-The poller checks the HTTP response and throws an error when the warehouse request fails.
-
-The error is caught and logged without terminating the SignalShelf server.
-
-### Synchronization Test
-
-I changed the warehouse status of `room-101` from `available` to `occupied`.
-
-The warehouse API reflected the change immediately, while SignalShelf only reflected the change after the next polling cycle.
-
-This demonstrated an important architectural characteristic of polling: synchronization is delayed by the polling interval.
-
-### Day 3 Trade-off
-
-The polling approach is relatively simple to understand and implement, but it can introduce synchronization delay and unnecessary requests when no warehouse data has changed.
-
-This trade-off is important because the architecture may need to change if the client requires faster event propagation.
-
-### Polling Synchronization Observation
-
-I changed `room-101` in the mock warehouse from `occupied` to `available`.
-
-The warehouse API reflected the change immediately. SignalShelf did not necessarily reflect the change immediately because it relies on its scheduled polling cycle.
-
-This demonstrated that the polling architecture can produce a temporary difference between the source system and the SignalShelf cache.
-
-The trade-off is:
-
-- shorter polling intervals reduce stale-data time but increase requests;
-- longer polling intervals reduce requests but increase stale-data time.
-
-This observation became an important architectural consideration for the later system change.
-
-## Day 3 — Polling Synchronization Observation
-
-I tested what happens when the warehouse resource changes between polling cycles.
-
-Before the change, `room-101` was `occupied` in SignalShelf.
-
-I then changed the warehouse value to `available` using the mock warehouse API.
-
-The warehouse immediately returned:
-
-`available`
-
-However, SignalShelf still returned:
-
-`occupied`
-
-This demonstrated that the cached value can temporarily become stale when using polling.
-
-The difference exists because SignalShelf only learns about warehouse changes during its polling cycle.
-
-### Architectural Trade-off
-
-Polling provides a relatively simple synchronization mechanism, but it introduces synchronization latency.
-
-A shorter polling interval can reduce the time that cached information remains stale, but it causes more requests to the warehouse.
-
-A longer polling interval reduces requests but increases the possible period of stale data.
-
-This became an important architectural limitation of the Day 3 implementation.
-
-### Day 2 Regression Test
-
-After integrating the Day 3 polling architecture, I retested the HMAC-protected webhook endpoint from Day 2.
-
-I generated a signature for the exact JSON payload and sent it with the request.
-
-Expected result: `200 OK`.
-
-Actual result: `HTTP/1.1 200 OK` with `Webhook received`.
-
-Result: PASS.
-
-This confirmed that adding the warehouse polling functionality did not break the existing HMAC verification, validation, or resource update functionality.
+This trade-off became an important architectural consideration before the next phase of the project.
 
 ## Day 4 — Change Detection
 
@@ -967,3 +716,38 @@ HMAC-signed webhook
 Print completion endpoint
     ↓
 Attendee CHECKED_IN
+
+
+## Day 6 — Reliability, Retry, and Final End-to-End Verification
+
+### Reliability improvements
+
+Day 6 focused on proving that the Redis + BullMQ architecture behaves reliably under normal, duplicate, invalid, and failed conditions.
+
+The implementation now provides:
+
+- Redis-backed durable queue infrastructure.
+- BullMQ job processing.
+- Three configured job attempts.
+- Fixed 1-second retry backoff.
+- HMAC authentication for webhook callbacks.
+- Job ID correlation between check-in requests and completion events.
+- Duplicate check-in protection.
+- Protection against completion events with the wrong job ID.
+- Idempotent handling of repeated completion callbacks.
+
+### Retry test
+
+A controlled BullMQ failure test was performed using a temporary worker.
+
+The worker intentionally threw an error and BullMQ retried the job three times:
+
+```text
+Processing attempt 1
+Job failed. Attempts made: 1
+
+Processing attempt 2
+Job failed. Attempts made: 2
+
+Processing attempt 3
+Job failed. Attempts made: 3
