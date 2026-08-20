@@ -1,15 +1,26 @@
 import crypto from 'node:crypto';
+import dotenv from 'dotenv';
 
-const secret = 'signalshelf_demo_secret';
+dotenv.config();
+
+const jobId = process.argv[2];
+const attendeeId = process.argv[3];
+
+if (!jobId || !attendeeId) {
+    console.error(
+        'Usage: node generate-print-signature.js <jobId> <attendeeId>'
+    );
+    process.exit(1);
+}
 
 const payload = JSON.stringify({
-    jobId: '9097fe89-5307-4aee-8a1c-597dd75bd823',
-    attendeeId: 'ATT-001',
+    jobId,
+    attendeeId,
     status: 'completed'
 });
 
 const signature = crypto
-    .createHmac('sha256', secret)
+    .createHmac('sha256', process.env.WEBHOOK_SECRET)
     .update(payload)
     .digest('hex');
 
