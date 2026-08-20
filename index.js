@@ -1,12 +1,11 @@
 import express from 'express';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import crypto from 'node:crypto';
 import dotenv from 'dotenv';
-import { startPolling } from './poller.js';
+import { attendees } from './attendees.js';
 
 dotenv.config();
 
 const app = express();
-const resources = {};
 
 const webhookSecret = process.env.WEBHOOK_SECRET;
 
@@ -15,7 +14,8 @@ function verifyWebhookSignature(payload, signature) {
         return false;
     }
 
-    const expectedSignature = createHmac('sha256', webhookSecret)
+    const expectedSignature = crypto
+        .createHmac('sha256', webhookSecret)
         .update(payload)
         .digest('hex');
 
@@ -26,7 +26,7 @@ function verifyWebhookSignature(payload, signature) {
         return false;
     }
 
-    return timingSafeEqual(expectedBuffer, receivedBuffer);
+    return crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
 }
 
 app.use(express.json({
@@ -39,49 +39,138 @@ app.get('/', (req, res) => {
     res.send('Hello SignalShelf');
 });
 
-app.post('/webhooks/resource-update', (req, res) => {
-    console.log('Webhook received');
+app.post('/check-in/:attendeeId', async (req, res) => {
+    const attendeeId = req.params.attendeeId;
+    const attendee = attendees[attendeeId];
 
-    const signature = req.headers['x-webhook-signature'];
-
-    if (!verifyWebhookSignature(req.rawBody, signature)) {
-        console.log('Invalid webhook signature');
-        return res.status(401).send('Invalid webhook signature');
+    if (!attendee) {
+        return res.status(404).json({
+            error: 'Attendee not found'
+        });
     }
-
-    console.log('Webhook signature verified');
-    console.log('Request body:', req.body);
-
-    const { event, resourceId, status } = req.body;
 
     if (
-        event !== 'resource.updated' ||
-        !resourceId ||
-        !['available', 'occupied', 'maintenance'].includes(status)
+        attendee.status === 'PENDING' ||
+        attendee.status === 'CHECKED_IN'
     ) {
-        console.log('Invalid resource update received');
-        return res.status(400).send('Invalid resource update');
+        return res.status(409).json({
+            error: 'Attendee already has a check-in in progress or is already checked in',
+            status: attendee.status
+        });
     }
 
-    resources[resourceId] = status;
+    const jobId = crypto.randomUUID();
 
-    console.log('Valid status update received');
+    attendee.status = 'PENDING';
+    attendee.jobId = jobId;
 
-    res.status(200).send('Webhook received');
+    try {
+    const response = await fetch('http://localhost:4000/print-queue', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            jobId,
+            attendeeId
+        })
+    });
+
+    if (!response.ok) {
+        attendee.status = 'NOT_CHECKED_IN';
+        attendee.jobId = null;
+
+        return res.status(503).json({
+            error: 'Unable to publish print request'
+        });
+    }
+
+    } catch (error) {
+        console.error('Failed to contact printer vendor:', error.message);
+
+        attendee.status = 'NOT_CHECKED_IN';
+        attendee.jobId = null;
+
+        return res.status(503).json({
+            error: 'Printer vendor unavailable'
+        });
+    }
+
+    console.log(
+        `Check-in request queued for ${attendeeId}. Job ID: ${jobId}`
+    );
+
+    return res.status(202).json({
+        message: 'Print request queued',
+        attendeeId,
+        jobId,
+        status: 'PENDING'
+    });
 });
 
-app.get('/resources/:id', (req, res) => {
+app.get('/attendees/:attendeeId', (req, res) => {
+    const attendee = attendees[req.params.attendeeId];
 
-    const resourceId = req.params.id;
-    const status = resources[resourceId];
-
-    if (!status) {
-        res.status(404).send('Resource not found');
-        return;
+    if (!attendee) {
+        return res.status(404).json({
+            error: 'Attendee not found'
+        });
     }
 
-    res.send(status);
+    res.json(attendee);
+});
 
+app.post('/webhooks/print-complete', (req, res) => {
+        const signature = req.headers['x-webhook-signature'];
+
+    if (!verifyWebhookSignature(req.rawBody, signature)) {
+        return res.status(401).json({
+            error: 'Invalid webhook signature'
+        });
+    }
+    const { jobId, attendeeId, status } = req.body;
+
+    if (!jobId || !attendeeId || status !== 'completed') {
+        return res.status(400).json({
+            error: 'Invalid print completion'
+        });
+    }
+
+    const attendee = attendees[attendeeId];
+
+    if (!attendee) {
+        return res.status(404).json({
+            error: 'Attendee not found'
+        });
+    }
+
+    if (attendee.jobId !== jobId) {
+        return res.status(409).json({
+            error: 'Job does not match attendee'
+        });
+    }
+
+    if (attendee.status === 'CHECKED_IN') {
+    return res.status(200).json({
+        message: 'Check-in already confirmed',
+        attendeeId,
+        jobId,
+        status: 'CHECKED_IN'
+    });
+}
+
+    attendee.status = 'CHECKED_IN';
+
+    console.log(
+        `Attendee ${attendeeId} checked in. Job ${jobId} completed.`
+    );
+
+    return res.status(200).json({
+        message: 'Check-in confirmed',
+        attendeeId,
+        jobId,
+        status: 'CHECKED_IN'
+    });
 });
 
 app.use((req, res) => {
@@ -90,5 +179,4 @@ app.use((req, res) => {
 
 app.listen(3000, () => {
     console.log('SignalShelf server is running');
-    startPolling(resources);
 });

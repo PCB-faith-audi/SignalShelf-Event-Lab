@@ -726,3 +726,200 @@ When the first experiment did not produce a change event, I investigated why. Si
 ### GUARD
 
 The system only reports a change when a previous cached value exists and the newly retrieved value differs from it. This helps prevent the initial state from being incorrectly treated as a state transition.
+
+
+# Meridian Pivot — Asynchronous Badge Printing
+
+## Pivot Summary
+
+The original SignalShelf check-in flow depended on a synchronous printer API. The kiosk would send a print request and wait for the printer response before completing the check-in.
+
+The Meridian Pivot changed this requirement. The printer vendor deprecated the synchronous API, so the system was redesigned around asynchronous communication:
+
+```text
+Kiosk
+  ↓
+POST /check-in/:attendeeId
+  ↓
+SignalShelf creates job
+  ↓
+POST /print-queue
+  ↓
+Vendor queue
+  ↓
+Printer processes job
+  ↓
+POST /webhooks/print-complete
+  ↓
+HMAC verification
+  ↓
+Attendee becomes CHECKED_IN
+```
+
+## What Was Implemented
+
+### 1. Asynchronous print queue
+
+The SignalShelf service no longer waits for printer completion.
+
+A check-in request creates a unique `jobId`, changes the attendee state to `PENDING`, and publishes the print request to the vendor queue.
+
+The check-in endpoint returns HTTP `202 Accepted`.
+
+### 2. Vendor-side processing
+
+The mock badge-printer vendor consumes jobs from the queue and simulates printing.
+
+The vendor waits before sending a completion callback, representing asynchronous real-world processing.
+
+### 3. Print completion webhook
+
+SignalShelf exposes:
+
+```text
+POST /webhooks/print-complete
+```
+
+The vendor sends the job ID, attendee ID, and completion status to this endpoint.
+
+### 4. Webhook authentication
+
+Print-completion callbacks are protected with an HMAC-SHA256 signature using `WEBHOOK_SECRET`.
+
+Invalid or missing signatures are rejected with:
+
+```text
+401 Unauthorized
+```
+
+The raw request body is captured before JSON parsing so the signature can be verified against the exact payload received.
+
+### 5. Duplicate-scan protection
+
+An attendee cannot receive another badge when their status is already `PENDING` or `CHECKED_IN`.
+
+A duplicate check-in request returns:
+
+```text
+409 Conflict
+```
+
+This protection remains active even though printing is asynchronous.
+
+### 6. Job correlation
+
+The webhook must contain the same `jobId` stored against the attendee.
+
+A mismatched job is rejected with:
+
+```text
+409 Conflict
+```
+
+This prevents a completion event for one print job from incorrectly checking in another attendee.
+
+### 7. Retry and failure handling
+
+Webhook delivery uses up to three delivery attempts.
+
+A failed job can also be returned to the vendor queue for another processing attempt.
+
+The demonstrated failure path produced:
+
+```text
+Webhook attempt 1/3: 401
+Webhook attempt 2/3: 401
+Webhook attempt 3/3: 401
+Retrying job ... Attempt 2/3
+Retrying job ... Attempt 3/3
+Job ... permanently failed after 3 attempts
+```
+
+This demonstrates that the system does not silently lose failed print jobs.
+
+## Validation Evidence
+
+The following attendee scenarios have been tested:
+
+* ATT-001 — successful asynchronous check-in
+* ATT-002 — successful asynchronous check-in
+* ATT-003 — successful asynchronous check-in
+* Duplicate check-in — rejected with `409 Conflict`
+* Unknown attendee — rejected with `404 Not Found`
+* Invalid webhook signature — rejected with `401 Unauthorized`
+* Incorrect job ID — rejected with `409 Conflict`
+* Invalid print completion payload — rejected with `400 Bad Request`
+* Failed webhook delivery — retried and eventually permanently failed
+
+## Current Architecture
+
+```text
+                ┌─────────────────────┐
+                │   SignalShelf Kiosk │
+                └──────────┬──────────┘
+                           │
+                           │ POST /check-in
+                           ▼
+                ┌─────────────────────┐
+                │   SignalShelf API   │
+                │                     │
+                │ PENDING + jobId     │
+                └──────────┬──────────┘
+                           │
+                           │ REST publish
+                           ▼
+                ┌─────────────────────┐
+                │   Vendor Queue      │
+                └──────────┬──────────┘
+                           │
+                           ▼
+                ┌─────────────────────┐
+                │ Mock Badge Printer  │
+                └──────────┬──────────┘
+                           │
+                           │ signed webhook
+                           ▼
+                ┌─────────────────────┐
+                │ /webhooks/          │
+                │ print-complete      │
+                └──────────┬──────────┘
+                           │
+                           ▼
+                ┌─────────────────────┐
+                │ HMAC verification   │
+                │ + job correlation   │
+                └──────────┬──────────┘
+                           │
+                           ▼
+                    CHECKED_IN
+```
+
+## Learning From the Pivot
+
+The main architectural lesson is that asynchronous integrations change the meaning of application state.
+
+`PENDING` is now a real business state rather than an intermediate implementation detail.
+
+The system must therefore:
+
+1. Create a durable correlation identifier (`jobId`).
+2. Track the state of the check-in.
+3. Accept completion events later.
+4. Authenticate external callbacks.
+5. Correlate callbacks with the original request.
+6. Protect against duplicate scans.
+7. Retry failed delivery.
+8. Stop retrying after a defined limit.
+9. Make failure visible rather than silently marking the attendee as checked in.
+
+## Current Limitation
+
+The current queue is an in-memory JavaScript queue. It demonstrates the asynchronous architecture but is not yet a durable production message broker.
+
+The next architectural step is to evaluate replacing the in-memory queue with a real queue technology while preserving the existing API and webhook contract.
+
+## Pivot Status
+
+The core Meridian Pivot requirements are implemented and demonstrated.
+
+The next phase is to harden the queue architecture, improve observability, and prepare the implementation for a final end-to-end demonstration.
