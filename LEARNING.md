@@ -1,753 +1,1019 @@
-# SignalShelf Event Lab — Learning Journal
+# SignalShelf Event Lab — Final Learning Journal
 
-## Assignment
+## Days 1–7: Complete Journey from Initial Integration to the Meridian Pivot
 
-The Meridian Pivot — Assignment 1
+**Finalized: 21 August 2026**
 
-## Technical Concept Learned
+---
 
-Node.js and Express backend development, specifically webhook-style HTTP communication.
+## 1. Purpose of This Journal
 
-## Why This Was Unfamiliar
+This journal records the complete engineering learning journey behind SignalShelf Event Lab, including the early integration experiments, the Meridian Pivot, webhook security, asynchronous job processing, Redis/BullMQ migration, reliability testing, bugs, debugging lessons, and final backend verification.
 
-Before this assignment, I was more familiar with frontend development than building an HTTP backend that receives and processes events.
+The purpose is not merely to list commands that worked. It is to explain **why the architecture changed, what failed, how it was diagnosed, and what each failure taught us about backend engineering.**
 
-## What I Learned
+---
 
-### Node.js
+## 2. The Original Problem
 
-[Explain in your own words.]
+The project started around an event/integration scenario where an attendee check-in could trigger badge printing. The early prototype used simple application state and mock/in-memory components.
 
-### Express
+The first architecture was useful for understanding:
 
-[Explain in your own words.]
+- HTTP endpoints
+- external integration concepts
+- polling
+- webhooks
+- basic state changes
+- request/response behavior
 
-### GET vs POST
+But it did not fully represent what happens when badge printing is slow, asynchronous, unavailable, duplicated, or completed later by another system.
 
-GET is used to request/retrieve information.
+That gap became the reason for the Meridian Pivot.
 
-POST is used to send information to a server for processing.
+---
 
-### JSON
+## 3. Early Polling Work
 
-I learned that `express.json()` allows Express to parse incoming JSON request bodies so they can be accessed through `req.body`.
+The project explored warehouse/resource polling before the final badge-printing architecture.
 
-### Webhooks
+The polling work established the idea of checking an external source for changes and reacting to them. It demonstrated a valid integration pattern, but also exposed its natural limitations:
 
-A webhook-style endpoint allows another system to send an HTTP request containing event data to my application.
+- the application must repeatedly ask for changes
+- changes can be detected only on a polling cycle
+- polling introduces unnecessary reads
+- latency depends on the polling interval
+- state synchronization becomes a concern
 
-### Route Parameters
+This was valuable because it created the conceptual contrast for webhooks: instead of repeatedly asking whether something happened, an external system can notify the application when it happens.
 
-I learned that `/resources/:id` creates a dynamic route and that `req.params.id` retrieves the value supplied in the URL.
+---
 
-### In-Memory Storage
+## 4. Webhook Fundamentals
 
-I used a JavaScript object to temporarily store resource statuses.
+The next stage introduced the completion webhook.
 
-The data disappears when the Node.js process stops.
-
-### Validation
-
-I learned that external input should not automatically be trusted. I validated the event, resource ID, and allowed resource statuses before storing data.
-
-## Endpoints
-
-- `GET /`
-- `POST /webhooks/resource-update`
-- `GET /resources/:id`
-
-## Debugging Evidence
-
-### ERR_HTTP_HEADERS_SENT
-
-I accidentally sent more than one response for the same request. I learned that a request should normally receive one response.
-
-### Validation Error
-
-Initially I checked the entire `req.body` instead of the `status` property. I corrected this by accessing `req.body.status`.
-
-### Missing Resources
-
-I added a 404 response when a requested resource does not exist.
-
-## Responsible Engineering
-
-I learned that data received from external systems should be validated before it is processed or stored.
-
-## Final Outcome
-
-I successfully built a small working SignalShelf resource availability prototype that receives resource updates through a webhook-style POST endpoint, validates them, stores them temporarily in memory, and retrieves resource status through a GET endpoint.
-
-## What I Would Improve Next
-
-For a production system, I would consider persistent storage, stronger validation, authentication for webhook requests, structured error responses, logging, and protection against duplicate or replayed events.
-
-### HMAC Webhook Verification
-
-I learned that HMAC can be used to verify that a webhook request was generated using a shared secret. Node.js provides HMAC functionality through its built-in `node:crypto` module, so I did not need to install another package.
-
-I used `createHmac('sha256', secret)` to create an HMAC calculation, `update(message)` to provide the data being authenticated, and `digest('hex')` to produce the final hexadecimal signature.
-
-### HMAC Experiment
-
-I created a separate `hmac-lab.js` experiment before modifying my Express application.
-
-With the same secret and this message:
-
-`resource.updated:room-101:available`
-
-I received this signature:
-
-`80ac0901f4f0d60858b902cc7c3a4dab722892708a3e0c79b4c6ac769907a4a2`
-
-I then changed the resource status from `available` to `occupied`. The signature changed to:
-
-`fb530ccfe2dce3bee6a7f7bb626ec184079a60b054797e6d0285f8a1ebcea304`
-
-This showed me that changing the authenticated message changes the resulting signature.
-
-I then changed the secret while keeping the message as `resource.updated:room-101:occupied`. The signature changed to:
-
-`63cee7b2dca28934737eb69a38feb5007c0f9f3a65667a32b4f4755e48e2fef6`
-
-This demonstrated that the secret is also part of the HMAC calculation.
-
-### Independent Learning Evidence
-
-I initially understood the secret as something that protects the application, but I did not understand how `crypto.createHmac()` worked. I investigated the Node.js crypto functionality and tested it independently in a small experiment before integrating it into my Express application.
-
-The experiment helped me understand that the sender and receiver can independently calculate a signature using the same message and shared secret, then compare the results.
-
-
-## HMAC Verification Tests
-Test 1 — No signature
-Expected: 401
-Actual: ...
-Result: PASS/FAIL
-
-Test 2 — Incorrect signature
-Expected: 401
-Actual: ...
-Result: PASS/FAIL
-
-Test 3 — Correct signature
-Expected: 200
-Actual: ...
-Result: PASS/FAIL
-
-Test 4 — Signature reused with modified payload
-Expected: 401
-Actual: ...
-Result: PASS/FAIL
-
-## What I Learned From Testing
-
-I learned that the webhook signature is tied to both the secret and the exact payload being authenticated. A valid signature for one payload cannot simply be reused after changing the payload. This helped me understand why verifying the signature before processing webhook data is important.
-
-### Duplicate Webhook Route
-
-During HMAC testing, a correctly signed webhook request reached the application and passed signature verification, but the resource could not later be retrieved.
-
-I investigated the issue using:
-
-`grep -n "resources\|resource-update\|app.listen" index.js`
-
-This revealed that I had accidentally created two `POST /webhooks/resource-update` route handlers.
-
-The first route verified the HMAC signature but ended without calling the validation and storage logic. As a result, the request was authenticated but the resource status was never stored.
-
-I fixed this by combining the HMAC verification, payload validation, and resource storage into one route handler.
-
-This taught me that route flow matters: code placed in a separate handler for the same path does not automatically continue after the first handler sends or finishes a response.
-
-## HMAC Verification Test Results
-
-### Test 1 — Missing Signature
-
-I sent a resource update without an `x-webhook-signature` header.
-
-Expected result: The request should be rejected.
-
-Actual result: `Invalid webhook signature`.
-
-Result: PASS.
-
-### Test 2 — Incorrect Signature
-
-I sent a request with an intentionally incorrect signature.
-
-Expected result: The request should be rejected.
-
-Actual result: `Invalid webhook signature`.
-
-Result: PASS.
-
-### Test 3 — Correct Signature
-
-I generated a signature using the same webhook secret and the exact JSON payload sent to the application.
-
-Expected result: `200 OK` and the resource should be stored.
-
-Actual result: `HTTP/1.1 200 OK`.
-
-I then requested `/resources/room-101`, and the stored resource status was successfully available.
-
-Result: PASS.
-
-### Test 4 — Modified Payload With Old Signature
-
-I reused the signature generated for a payload containing the status `available`, but changed the request payload to `occupied`.
-
-Expected result: The request should be rejected because the signature was created for different data.
-
-Actual result: `HTTP/1.1 401 Unauthorized`.
-
-Result: PASS.
-
-### Data Integrity Check
-
-After the modified request was rejected, I requested `/resources/room-101` again.
-
-The resource still returned:
-
-`available`
-
-This showed that the rejected request did not overwrite the existing resource data.
-
-### What I Learned From Testing
-
-I learned that an HMAC signature is connected to both the shared secret and the exact request data. A signature that is valid for one payload cannot be reused after changing that payload.
-
-I also learned that verifying a webhook signature should happen before processing or storing external data.
-
-## Responsible Engineering Reflection
-
-### ETHOS
-
-I considered whether incoming webhook data should be trusted automatically. I decided that external input should be verified and validated before it can change application state.
-
-### HORIZON
-
-I considered future risks beyond the immediate prototype. The current implementation uses an in-memory object, so data disappears when the server stops. A production version would need persistent storage, stronger secret management, replay protection, monitoring, and more robust error handling.
-
-### TRACK
-
-I kept track of the changes and troubleshooting steps during development instead of only documenting the final successful result. This includes the HMAC experiments, failed tests, duplicate-route problem, and the fix.
-
-### OASIS
-
-I considered the operational behavior of the service. Invalid requests receive explicit HTTP errors instead of being silently accepted, making failures easier to identify and investigate.
-
-### PRIDE
-
-I tried to keep the implementation understandable and traceable. The webhook verification, validation, and storage steps are separated logically within the request flow.
-
-### TRAIL
-
-I maintained evidence of what I changed and why through the learning journal, terminal testing, Git changes, and debugging notes.
-
-### CYCLE
-
-I used an iterative process: build, test, observe the result, identify a problem, modify the implementation, and test again.
-
-### RANK
-
-I prioritized security and correctness before adding additional features. HMAC verification and payload validation were completed before moving toward further functionality.
-
-### HUNT
-
-When the expected resource was not being stored, I investigated the actual application rather than assuming the problem was with the testing command. I used source inspection and identified duplicate webhook routes as the root cause.
-
-### GUARD
-
-I protected the webhook secret by storing it in `.env` and adding `.env` to `.gitignore`. I also rejected unsigned, incorrectly signed, and modified webhook requests before they could update stored resource data.
-
-## Day 2 Completion Summary
-
-Today I extended my SignalShelf Event Lab prototype by learning and implementing HMAC-SHA256 webhook verification.
-
-I first experimented with Node.js `crypto` independently using `hmac-lab.js`. I learned that the same secret and message produce a deterministic HMAC signature, while changing the message produces a different signature.
-
-I then integrated the concept into my Express application. The application now captures the raw webhook request body, generates an expected HMAC using the secret stored in an environment variable, and compares it with the signature supplied by the sender.
-
-During testing I encountered a real blocker: I had accidentally created two handlers for the same webhook route. The first handler verified the signature but did not continue to the storage logic. I investigated this using `grep`, inspected the route definitions, identified the duplicate handlers, and combined the verification, validation, and storage logic into one route.
-
-I retested the application after the fix.
-
-The final tests showed:
-- Correctly signed webhook: 200 OK
-- Resource retrieval after valid webhook: available
-- Modified payload using an old signature: 401 Unauthorized
-- Resource remained available after the rejected request
-
-This prototype demonstrates that I can independently learn an unfamiliar backend/security concept, troubleshoot a real implementation problem, and document the reasoning and evidence behind the final solution.
-
-### Day 2 Limitations
-
-This is still a learning prototype rather than a production service. It uses in-memory storage, a single shared webhook secret, no persistent database, no replay protection, and no rate limiting. These limitations are intentionally documented rather than hidden.
-
-### Next Step
-
-The next phase will move from the independent prototype toward the Meridian Pivot system specification while preserving the lessons learned from webhook verification, validation, security, and debugging.
-
-## Day 3 — Polling Architecture and Baseline
-
-### Step 1: Mock Warehouse API
-
-I created a local mock warehouse service to simulate an external system that SignalShelf would query.
-
-The mock service runs on port 4000 and exposes:
-
-GET /warehouse/resources
-
-It returns three simulated resources:
-- room-101: available
-- room-102: occupied
-- room-103: maintenance
-
-This allowed me to test the polling architecture without depending on a third-party service.
-
-### Step 2: Learning HTTP Fetching
-
-I learned how a Node.js application can communicate with another HTTP service using the built-in `fetch` function.
-
-I created `polling-lab.js` to request data from the mock warehouse API running on port 4000.
-
-The request was:
-
-GET http://localhost:4000/warehouse/resources
-
-The warehouse returned JSON containing the current resource statuses.
-
-I used `async` and `await` because the HTTP request is asynchronous and the application must wait for the response before processing it.
-
-### Step 3: Polling and Cache Refresh
-
-I extended the prototype so that it could repeatedly request the warehouse API and update the SignalShelf cache.
-
-I initially tested a shorter interval of 10 seconds during development so I could observe repeated polling without waiting several minutes. After confirming the behavior, I configured the production interval to 300000 milliseconds, which is five minutes.
-
-I also added response checking and error handling so a failed warehouse request is logged instead of being treated as valid inventory data.
-
-### Architecture and Integration
-
-The Day 3 architecture is:
-
-Mock Warehouse API
-→ HTTP polling every five minutes
-→ SignalShelf cache
-→ GET /resources/:id
-
-I separated the polling logic into `poller.js` so that warehouse communication was handled independently from Express route logic. I then imported the poller into `index.js` and started polling when the server started.
-
-The first request happens immediately to populate the cache, and subsequent requests continue on the configured interval.
-
-### Verification and Tests
-
-The SignalShelf API successfully returned:
-
-- room-101: available
-- room-102: occupied
-- room-103: maintenance
-
-I also tested a nonexistent resource and confirmed that the API returned HTTP 404.
-
-I then simulated a resource change in the mock warehouse. After changing `room-101` from `available` to `occupied`, the warehouse API reflected the new value immediately, while SignalShelf updated the cache only after the next polling cycle.
-
-This demonstrated the core polling trade-off: synchronization is delayed by the polling interval, but the system remains simple and reliable.
-
-### Failure Handling
-
-I tested the polling service while the mock warehouse API was unavailable. The request failed, the error was caught, and the SignalShelf process remained running instead of crashing.
-
-I observed repeated failed polling attempts while the warehouse was down, but the main server continued to operate. This verified that the polling service handles external failures gracefully.
-
-### Day 3 Lessons Learned
-
-The polling approach is straightforward and easy to reason about, but it introduces data staleness and extra requests when data has not changed. A shorter polling interval reduces stale data but increases traffic; a longer interval reduces traffic but increases the chance of outdated information.
-
-This trade-off became an important architectural consideration before the next phase of the project.
-
-## Day 4 — Change Detection
-
-### Technical Concept Learned
-
-I learned how to detect changes between a previously cached value and a newly fetched value.
-
-The Day 3 poller copied warehouse data into the SignalShelf cache every time it polled. In Day 4, I changed the poller so it compares the previous cached status with the newly fetched warehouse status before updating the cache.
-
-The comparison follows this idea:
-
-old status → new status
-
-If the values are different, a change is detected.
-
-If the values are the same, no change is reported.
-
-### Initial State Behavior
-
-When SignalShelf starts for the first time, it does not have a previous value for a resource.
-
-For example:
-
-undefined → maintenance
-
-This is treated as the initial state rather than a detected change because there is no previous cached value to compare against.
-
-### Change Detection Experiment
-
-I first allowed SignalShelf to poll the warehouse and establish:
-
-room-101 = maintenance
-
-I then changed the warehouse value to:
-
-room-101 = available
-
-During the next polling cycle, SignalShelf detected:
-
-maintenance → available
-
-The application logged:
-
-`Change detected: room-101: maintenance → available`
-
-The SignalShelf cache was then updated to:
-
-`room-101: available`
-
-### Repeated Polling Test
-
-After the change was detected, subsequent polling cycles continued to retrieve the warehouse data.
-
-Because room-101 remained `available`, the application did not repeatedly report the same change.
-
-This demonstrated that the comparison is based on the previous state and the newly fetched state.
-
-### What I Learned
-
-I learned that polling does not have to blindly process every retrieved value. A polling system can compare the previous state with the current state and react only when a meaningful change occurs.
-
-This reduces unnecessary event processing and provides a bridge between polling-based synchronization and event-driven behavior.
-
-## Day 4 — Responsible Engineering Reflection
-
-### ETHOS
-
-I considered whether every polling result should automatically trigger processing. I chose to distinguish between unchanged data and actual state transitions so the system does not unnecessarily process identical information.
-
-### HORIZON
-
-I considered how this approach could behave as the system grows. A production system would need more robust change tracking, persistent state, monitoring, and possibly a dedicated event or message system.
-
-### TRACK
-
-I recorded the actual transition tested during development:
-
-`maintenance → available`
-
-I also documented the initial-state behavior and the repeated polling behavior.
-
-### OASIS
-
-The polling process provides observable logs showing successful synchronization and detected changes. This makes the system easier to monitor and troubleshoot.
-
-### PRIDE
-
-The change-detection logic is kept close to the synchronization process, making it easier to understand why a resource was updated.
-
-### TRAIL
-
-The Day 4 experiment is supported by terminal output, source-code changes, and this learning journal.
-
-### CYCLE
-
-I followed an iterative process: modify the poller, check syntax, run the system, change warehouse data, observe the polling result, and verify that the cache changed correctly.
-
-### RANK
-
-I prioritized correctness of state synchronization before adding more advanced event-processing features.
-
-### HUNT
-
-When the first experiment did not produce a change event, I investigated why. SignalShelf had started after the warehouse had already changed, so the warehouse value became the initial cached state. I then performed a second transition and successfully detected the change.
-
-### GUARD
-
-The system only reports a change when a previous cached value exists and the newly retrieved value differs from it. This helps prevent the initial state from being incorrectly treated as a state transition.
-
-
-# Meridian Pivot — Asynchronous Badge Printing
-
-## Pivot Summary
-
-The original SignalShelf check-in flow depended on a synchronous printer API. The kiosk would send a print request and wait for the printer response before completing the check-in.
-
-The Meridian Pivot changed this requirement. The printer vendor deprecated the synchronous API, so the system was redesigned around asynchronous communication:
+The conceptual flow became:
 
 ```text
-Kiosk
-  ↓
-POST /check-in/:attendeeId
-  ↓
-SignalShelf creates job
-  ↓
-POST /print-queue
-  ↓
-Vendor queue
-  ↓
-Printer processes job
-  ↓
-POST /webhooks/print-complete
-  ↓
-HMAC verification
-  ↓
-Attendee becomes CHECKED_IN
+Application requests work
+        ↓
+External process performs work
+        ↓
+External process sends completion event
+        ↓
+Application validates the event
+        ↓
+Application updates state
 ```
 
-## What Was Implemented
+The important discovery was that a webhook is not automatically trustworthy just because it reached a known URL.
 
-### 1. Asynchronous print queue
+That led to HMAC authentication.
 
-The SignalShelf service no longer waits for printer completion.
+---
 
-A check-in request creates a unique `jobId`, changes the attendee state to `PENDING`, and publishes the print request to the vendor queue.
+## 5. HMAC-SHA256 Learning
 
-The check-in endpoint returns HTTP `202 Accepted`.
+The project implemented HMAC-SHA256 using Node's `crypto` module.
 
-### 2. Vendor-side processing
-
-The mock badge-printer vendor consumes jobs from the queue and simulates printing.
-
-The vendor waits before sending a completion callback, representing asynchronous real-world processing.
-
-### 3. Print completion webhook
-
-SignalShelf exposes:
+The signing principle is:
 
 ```text
-POST /webhooks/print-complete
+signature = HMAC-SHA256(WEBHOOK_SECRET, exact_payload)
 ```
 
-The vendor sends the job ID, attendee ID, and completion status to this endpoint.
+The worker signs the payload. The API independently calculates the expected signature and compares it to the received `x-webhook-signature` header.
 
-### 4. Webhook authentication
+### Why the raw body mattered
 
-Print-completion callbacks are protected with an HMAC-SHA256 signature using `WEBHOOK_SECRET`.
+The Express JSON parser turns bytes into a JavaScript object. If the API later serializes the object itself, the byte representation could differ from what was originally signed.
 
-Invalid or missing signatures are rejected with:
+Therefore the API captured the raw body using Express middleware's `verify` hook.
+
+The verification sequence became:
+
+1. Receive raw request bytes.
+2. Read `x-webhook-signature`.
+3. Calculate the expected HMAC over the raw body.
+4. Compare signatures safely.
+5. Only then process the state transition.
+
+### Timing-safe comparison
+
+The final verifier used `crypto.timingSafeEqual` after checking equal lengths.
+
+This was a useful security lesson: correctness is not only about calculating the same hash; the comparison method also matters.
+
+---
+
+## 6. The Meridian Pivot
+
+The project then made its most important architectural change.
+
+The earlier print flow treated printing too much like a normal synchronous operation. The Meridian Pivot changed the business model:
 
 ```text
-401 Unauthorized
+PENDING
 ```
 
-The raw request body is captured before JSON parsing so the signature can be verified against the exact payload received.
+became a real state.
 
-### 5. Duplicate-scan protection
+A check-in request means:
 
-An attendee cannot receive another badge when their status is already `PENDING` or `CHECKED_IN`.
+> The system accepted a print job.
 
-A duplicate check-in request returns:
+It does **not** mean:
+
+> The badge is already printed.
+
+This distinction led to the final asynchronous design.
+
+---
+
+## 7. The New State Model
+
+The final attendee states were:
 
 ```text
-409 Conflict
+NOT_CHECKED_IN
+        |
+        | request accepted
+        v
+     PENDING
+        |
+        | valid completion
+        v
+   CHECKED_IN
 ```
 
-This protection remains active even though printing is asynchronous.
+This made the system easier to reason about.
 
-### 6. Job correlation
+### Why PENDING matters
 
-The webhook must contain the same `jobId` stored against the attendee.
-
-A mismatched job is rejected with:
+Without `PENDING`, the API might have only two choices:
 
 ```text
-409 Conflict
-```
-
-This prevents a completion event for one print job from incorrectly checking in another attendee.
-
-### 7. Retry and failure handling
-
-Webhook delivery uses up to three delivery attempts.
-
-A failed job can also be returned to the vendor queue for another processing attempt.
-
-The demonstrated failure path produced:
-
-```text
-Webhook attempt 1/3: 401
-Webhook attempt 2/3: 401
-Webhook attempt 3/3: 401
-Retrying job ... Attempt 2/3
-Retrying job ... Attempt 3/3
-Job ... permanently failed after 3 attempts
-```
-
-This demonstrates that the system does not silently lose failed print jobs.
-
-## Validation Evidence
-
-The following attendee scenarios have been tested:
-
-* ATT-001 — successful asynchronous check-in
-* ATT-002 — successful asynchronous check-in
-* ATT-003 — successful asynchronous check-in
-* Duplicate check-in — rejected with `409 Conflict`
-* Unknown attendee — rejected with `404 Not Found`
-* Invalid webhook signature — rejected with `401 Unauthorized`
-* Incorrect job ID — rejected with `409 Conflict`
-* Invalid print completion payload — rejected with `400 Bad Request`
-* Failed webhook delivery — retried and eventually permanently failed
-
-## Current Architecture
-
-```text
-                ┌─────────────────────┐
-                │   SignalShelf Kiosk │
-                └──────────┬──────────┘
-                           │
-                           │ POST /check-in
-                           ▼
-                ┌─────────────────────┐
-                │   SignalShelf API   │
-                │                     │
-                │ PENDING + jobId     │
-                └──────────┬──────────┘
-                           │
-                           │ REST publish
-                           ▼
-                ┌─────────────────────┐
-                │   Vendor Queue      │
-                └──────────┬──────────┘
-                           │
-                           ▼
-                ┌─────────────────────┐
-                │ Mock Badge Printer  │
-                └──────────┬──────────┘
-                           │
-                           │ signed webhook
-                           ▼
-                ┌─────────────────────┐
-                │ /webhooks/          │
-                │ print-complete      │
-                └──────────┬──────────┘
-                           │
-                           ▼
-                ┌─────────────────────┐
-                │ HMAC verification   │
-                │ + job correlation   │
-                └──────────┬──────────┘
-                           │
-                           ▼
-                    CHECKED_IN
-```
-
-## Learning From the Pivot
-
-The main architectural lesson is that asynchronous integrations change the meaning of application state.
-
-`PENDING` is now a real business state rather than an intermediate implementation detail.
-
-The system must therefore:
-
-1. Create a durable correlation identifier (`jobId`).
-2. Track the state of the check-in.
-3. Accept completion events later.
-4. Authenticate external callbacks.
-5. Correlate callbacks with the original request.
-6. Protect against duplicate scans.
-7. Retry failed delivery.
-8. Stop retrying after a defined limit.
-9. Make failure visible rather than silently marking the attendee as checked in.
-
-## Queue Architecture Update
-
-The original implementation used an in-memory JavaScript queue and mock printer vendor.
-
-That architecture was replaced with Redis + BullMQ.
-
-Redis now provides the external queue backing, while BullMQ manages job creation, worker processing, retries, backoff, completion, and failure states.
-
-The existing API and webhook contract were preserved during the migration.
-
-The current architecture is therefore:
-
-```text
-Check-in API
-    ↓
-BullMQ
-    ↓
-Redis
-    ↓
-BullMQ Worker
-    ↓
-HMAC-signed webhook
-    ↓
-Print completion endpoint
-    ↓
+NOT_CHECKED_IN
 CHECKED_IN
+```
 
-## Pivot Status
+That would encourage the dangerous assumption that accepting a print request means printing succeeded.
 
-The core Meridian Pivot requirements are implemented and demonstrated.
+With `PENDING`, the application can truthfully represent work that is in progress.
 
-The next phase is to harden the queue architecture, improve observability, and prepare the implementation for a final end-to-end demonstration.
+---
 
-## Day 5 — Redis + BullMQ Async Queue
+## 8. Durable Correlation IDs
 
-### Pivot implementation
+Every check-in creates a UUID:
 
-The SignalShelf check-in backend was migrated from the earlier in-memory/vendor simulation to a Redis-backed asynchronous queue using BullMQ.
+```js
+const jobId = crypto.randomUUID();
+```
 
-New architecture:
+That ID is stored with the attendee and sent into the queue.
+
+The completion webhook must provide the same `jobId`.
+
+The backend checks:
 
 ```text
-Check-in API
-    ↓
+attendee.jobId === webhook.jobId
+```
+
+If the IDs do not match, the callback is rejected.
+
+This is one of the most important lessons from the project:
+
+> Authentication proves that a sender knows the shared secret. Correlation proves that the message belongs to this specific operation.
+
+You need both.
+
+---
+
+## 9. Why HTTP 202 Was Correct
+
+The check-in endpoint eventually returned:
+
+```text
+202 Accepted
+```
+
+with:
+
+```json
+{
+  "message": "Print request queued",
+  "attendeeId": "ATT-001",
+  "jobId": "...",
+  "status": "PENDING"
+}
+```
+
+This is more semantically accurate than returning a successful completion response.
+
+The API has accepted responsibility for processing the work, but the final operation is still pending.
+
+This was an important REST/API design lesson.
+
+---
+
+## 10. Queue Failure Rollback
+
+The API updates the attendee before queueing:
+
+```text
+NOT_CHECKED_IN → PENDING
+```
+
+But queue submission can fail.
+
+The final implementation catches queue errors and rolls the attendee back:
+
+```text
+PENDING → NOT_CHECKED_IN
+jobId → null
+```
+
+Then it returns:
+
+```text
+503 Service Unavailable
+```
+
+This prevents a dangerous state where the application claims that work is pending even though the job was never successfully accepted by the queue.
+
+That was a strong reliability lesson:
+
+> State should reflect what the system actually knows happened.
+
+---
+
+## 11. Moving from In-Memory Queue to Redis/BullMQ
+
+The earlier queue was an in-memory JavaScript queue.
+
+Its limitations were clear:
+
+- queue data could disappear when the process stopped
+- no real broker was involved
+- retry behavior was not representative of a production queue
+- API and worker could not depend on a shared durable queue backend
+
+The project therefore migrated to:
+
+```text
+BullMQ + Redis
+```
+
+### Final queue architecture
+
+```text
+Express API
+     ↓
 BullMQ Queue
-    ↓
+     ↓
 Redis
-    ↓
+     ↓
 BullMQ Worker
-    ↓
-HMAC-signed webhook
-    ↓
-Print completion endpoint
-    ↓
-Attendee CHECKED_IN
+```
 
+This preserved the existing application-level job contract while replacing the queue implementation underneath it.
 
-## Day 6 — Reliability, Retry, and Final End-to-End Verification
+---
 
-### Reliability improvements
+## 12. BullMQ Configuration
 
-Day 6 focused on proving that the Redis + BullMQ architecture behaves reliably under normal, duplicate, invalid, and failed conditions.
-
-The implementation now provides:
-
-- Redis-backed durable queue infrastructure.
-- BullMQ job processing.
-- Three configured job attempts.
-- Fixed 1-second retry backoff.
-- HMAC authentication for webhook callbacks.
-- Job ID correlation between check-in requests and completion events.
-- Duplicate check-in protection.
-- Protection against completion events with the wrong job ID.
-- Idempotent handling of repeated completion callbacks.
-
-### Retry test
-
-A controlled BullMQ failure test was performed using a temporary worker.
-
-The worker intentionally threw an error and BullMQ retried the job three times:
+The final queue was named:
 
 ```text
-Processing attempt 1
-Job failed. Attempts made: 1
+print-jobs
+```
 
-Processing attempt 2
-Job failed. Attempts made: 2
+The job type was:
 
-Processing attempt 3
-Job failed. Attempts made: 3
+```text
+print-badge
+```
+
+The queue was configured with:
+
+```text
+attempts: 3
+backoff: fixed, 1000 ms
+removeOnComplete: true
+removeOnFail: false
+```
+
+The design means:
+
+- transient failures get another chance
+- retries do not happen forever
+- successful jobs can be cleaned up
+- failed jobs remain visible for investigation
+
+This is much closer to real asynchronous integration behavior.
+
+---
+
+## 13. Redis Verification
+
+Redis was repeatedly checked with:
+
+```text
+redis-cli ping
+```
+
+and returned:
+
+```text
+PONG
+```
+
+Dependency verification showed:
+
+```text
+bullmq@6.1.2
+ioredis@6.0.0
+```
+
+This gave confidence that the queue's runtime dependencies were actually installed and available.
+
+---
+
+## 14. Shared Redis Configuration
+
+A new `redis-config.js` was introduced:
+
+```js
+export const redisConnection = {
+    host: '127.0.0.1',
+    port: 6379
+};
+```
+
+Both the queue and worker imported it.
+
+Before this change, Redis connection configuration existed in multiple places. Centralizing it improved consistency and maintainability.
+
+The change was verified using:
+
+```text
+node --check redis-config.js
+node --check redis-queue.js
+node --check redis-worker.js
+```
+
+and a module-load test confirmed:
+
+```text
+Redis configuration loaded successfully
+```
+
+---
+
+## 15. Worker Design
+
+The final worker consumes the `print-jobs` queue.
+
+For every job it creates:
+
+```json
+{
+  "jobId": "<original job ID>",
+  "attendeeId": "<original attendee ID>",
+  "status": "completed"
+}
+```
+
+It serializes that payload, signs it, and sends it to:
+
+```text
+POST /webhooks/print-complete
+```
+
+If the webhook returns a non-success status, the worker throws an error.
+
+That error tells BullMQ that the job failed, allowing the configured retry behavior to operate.
+
+---
+
+## 16. The Signature Generator Refactor
+
+During testing, the original signature generator contained a fixed payload/secret approach.
+
+It was refactored into a reusable command-line utility.
+
+The new usage became:
+
+```text
+node generate-print-signature.js <jobId> <attendeeId>
+```
+
+It loads the secret from `.env`, constructs the exact expected payload, and prints the payload and signature.
+
+This was a good example of turning a temporary debugging script into a reusable engineering tool.
+
+---
+
+## 17. Bug: ESM Node One-Liner
+
+One testing attempt used a Node one-liner containing `import` statements and resulted in:
+
+```text
+SyntaxError: Unexpected identifier 'crypto'
+```
+
+The issue was not with HMAC itself. It was the evaluation context and how the command was being interpreted.
+
+### Lesson
+
+A repeatable script is better than a complicated shell one-liner for security-sensitive test data.
+
+Instead of repeatedly fighting the command environment, the reusable signature generator became the reliable test mechanism.
+
+---
+
+## 18. Bug: API Not Running
+
+At several points a curl command returned:
+
+```text
+curl: (7) Failed to connect to localhost port 3000 after 0 ms: Couldn't connect to server
+```
+
+The cause was straightforward: the Express process was not running.
+
+The worker can be running while the API is stopped, and Redis can be running while both application processes are stopped.
+
+This produced an important operational lesson:
+
+```text
+Redis availability
+≠ API availability
+≠ Worker availability
+```
+
+These are separate runtime dependencies.
+
+---
+
+## 19. Bug: Command Pasting / Concatenated Curl Commands
+
+Some terminal commands were pasted without proper line separation, creating output such as multiple curl commands visually running together.
+
+The backend still processed valid requests, but the evidence became difficult to read.
+
+### Lesson
+
+When performing acceptance tests, reproducibility and readable evidence matter. Commands should be run separately or chained intentionally with clear shell separators.
+
+---
+
+## 20. Wrong-Job Correlation Test
+
+A deliberate failure was created using:
+
+```text
+WRONG-JOB-999
+```
+
+for ATT-002.
+
+The payload was correctly signed.
+
+The server returned:
+
+```text
+409 Conflict
+```
+
+This was a particularly valuable test because it demonstrated that signature verification alone is not enough.
+
+The event was authentic according to the shared secret, but it did not belong to ATT-002's current operation.
+
+The attendee remained:
+
+```text
+CHECKED_IN
+```
+
+with its legitimate job ID.
+
+---
+
+## 21. Duplicate Completion Test
+
+A valid completion event for ATT-002 was submitted twice.
+
+The first completion was already reflected in the attendee state.
+
+The repeated event returned:
+
+```text
+200 OK
+```
+
+with:
+
+```text
+Check-in already confirmed
+```
+
+This demonstrated idempotency.
+
+In distributed systems, duplicate delivery is not an unusual edge case. A robust consumer should expect it.
+
+---
+
+## 22. Duplicate Check-In Test
+
+After ATT-001 became `CHECKED_IN`, another:
+
+```text
+POST /check-in/ATT-001
+```
+
+returned:
+
+```text
+409 Conflict
+```
+
+The state remained unchanged.
+
+This protected the system from duplicate scans/check-in attempts.
+
+---
+
+## 23. Three-Attendee End-to-End Test
+
+A complete end-to-end test was performed with:
+
+- ATT-001 — Amina Hassan
+- ATT-002 — Brian Otieno
+- ATT-003 — Carol Wanjiku
+
+All three were successfully queued and eventually became:
+
+```text
+CHECKED_IN
+```
+
+The test proved that the queue/worker/webhook/state path worked repeatedly, not only for one manually constructed request.
+
+---
+
+## 24. Retry Test
+
+A temporary `retry-test-worker.js` was created specifically to force failures.
+
+The observed sequence was:
+
+```text
+Processing attempt 1 for job 1
+Job 1 failed. Attempts made: 1.
+
+Processing attempt 2 for job 1
+Job 1 failed. Attempts made: 2.
+
+Processing attempt 3 for job 1
+Job 1 failed. Attempts made: 3.
+```
+
+The test then stopped and the temporary worker was removed.
+
+### Lesson
+
+Retry logic should not be assumed merely because configuration exists. It should be deliberately exercised and observed.
+
+---
+
+## 25. Graceful Worker Shutdown
+
+The worker was started directly and then interrupted with SIGINT.
+
+It produced:
+
+```text
+Received SIGINT. Shutting down worker...
+BullMQ worker closed successfully
+```
+
+This confirmed that the worker has explicit shutdown handling.
+
+Graceful shutdown is important for deployments, restarts, maintenance, and avoiding abrupt termination while work is active.
+
+---
+
+## 26. Graceful API Shutdown
+
+The Express server was similarly tested:
+
+```text
+Received SIGINT. Shutting down API server...
+HTTP server closed successfully
+```
+
+This demonstrated that the API can close its HTTP server deliberately.
+
+---
+
+## 27. Syntax and Dependency Verification
+
+The following were checked repeatedly during the final phase:
+
+```text
+node --check index.js
+node --check redis-config.js
+node --check redis-queue.js
+node --check redis-worker.js
+```
+
+All completed successfully.
+
+Dependency verification:
+
+```text
+npm list bullmq ioredis
+```
+
+showed:
+
+```text
+bullmq@6.1.2
+ioredis@6.0.0
+```
+
+---
+
+## 28. Environment Secret Verification
+
+`.gitignore` contains:
+
+```text
+node_modules/
+.env
+```
+
+The command:
+
+```text
+git ls-files .env
+```
+
+returned no tracked `.env` file.
+
+This was important because the webhook secret must not enter source control.
+
+---
+
+## 29. Documentation Drift and Historical Files
+
+A repository search found:
+
+```text
+README.md: In-memory storage
+LEARNING.md: historical in-memory/vendor references
+```
+
+and files such as:
+
+```text
+printer-vendor.js
+vendor-server.js
+queue.js
+```
+
+still existed.
+
+These files document earlier learning stages. They should not be confused with the final active print path.
+
+The final active architecture is:
+
+```text
+Redis + BullMQ + Worker + HMAC webhook
+```
+
+This distinction is important for engineering documentation: historical implementation details can be valuable, but the final architecture must be clearly identified.
+
+---
+
+## 30. A Subtle but Important Limitation
+
+Although the print queue is now Redis-backed, attendee records are still held in an in-memory JavaScript object.
+
+Therefore:
+
+```text
+Redis durability
+```
+
+does not automatically mean:
+
+```text
+Application state durability
+```
+
+If the Express process restarts, attendee state can be lost.
+
+This is why the correct final assessment is that the project demonstrates a strong asynchronous backend pattern but remains a learning prototype rather than a fully production-ready service.
+
+---
+
+## 31. Security Lessons
+
+### Authentication is not correlation
+
+A valid HMAC means the event was signed with the shared secret.
+
+It does not mean the event is the right event for the right attendee.
+
+Therefore:
+
+```text
+HMAC verification
+        +
+job correlation
+```
+
+are both required.
+
+### Raw-body signing matters
+
+The verifier must calculate the HMAC over the exact payload bytes.
+
+### Secrets must stay outside Git
+
+`.env` is ignored and was confirmed untracked.
+
+### Duplicate events are normal
+
+Webhook consumers should be designed for idempotency.
+
+---
+
+## 32. Reliability Lessons
+
+The project demonstrated the following reliability principles:
+
+### Explicit state
+
+`PENDING` communicates that work exists but is unfinished.
+
+### Correlation
+
+`jobId` ties asynchronous work back to the original business operation.
+
+### Retry
+
+BullMQ retries failed work according to a defined policy.
+
+### Failure visibility
+
+Failed jobs are not automatically removed.
+
+### Idempotency
+
+Repeated completion events do not create repeated state transitions.
+
+### Rollback
+
+If queue submission fails, the API restores the attendee to the pre-request state.
+
+### Graceful shutdown
+
+API and worker processes close cleanly.
+
+---
+
+## 33. Git and Audit Trail
+
+The major Git milestones were:
+
+```text
+1ed97b0 feat: add warehouse polling integration
+b0ca110 feat: add polling change detection
+173036d feat: complete async badge printing pivot
+c2b5d23 feat: complete async badge printing pivot
+976c572 feat: migrate print queue to Redis and BullMQ
+521dc53 refactor: make webhook signature generator reusable
+aaa24a1 docs: document Day 6 reliability verification
+646df52 feat: finalize SignalShelf backend
+```
+
+The final repository verification showed:
+
+```text
+On branch main
+Your branch is up to date with 'origin/main'.
+nothing to commit, working tree clean
+```
+
+This is important evidence that the final implementation was committed and pushed rather than left as untracked local work.
+
+---
+
+## 34. Final Architecture Review
+
+### API responsibility
+
+The API:
+
+- validates the attendee
+- prevents duplicate/in-progress check-ins
+- creates the correlation ID
+- marks PENDING
+- queues the work
+- rolls back on queue failure
+- returns 202
+
+### Queue responsibility
+
+BullMQ/Redis:
+
+- accepts the job
+- stores queue state
+- controls attempts
+- applies backoff
+- retains failed jobs
+
+### Worker responsibility
+
+The worker:
+
+- consumes jobs
+- creates the completion event
+- signs the payload
+- calls the completion endpoint
+- reports success/failure
+- participates in retry behavior
+
+### Webhook responsibility
+
+The API's completion endpoint:
+
+- verifies HMAC
+- validates required fields
+- finds the attendee
+- checks job correlation
+- handles duplicate completion
+- transitions PENDING → CHECKED_IN
+
+This separation of responsibilities is one of the strongest outcomes of the project.
+
+---
+
+## 35. What I Would Improve Next
+
+If this backend were promoted toward production, the next engineering work would be:
+
+1. Persist attendees in PostgreSQL or another durable database.
+2. Add transactional state changes.
+3. Add API authentication and authorization.
+4. Add rate limiting.
+5. Use a managed Redis deployment.
+6. Add TLS/authentication for Redis connections.
+7. Store secrets in a secrets manager.
+8. Add webhook timestamps/nonces for replay protection.
+9. Add structured logging.
+10. Add metrics and distributed tracing.
+11. Add dead-letter handling after retry exhaustion.
+12. Add automated unit tests.
+13. Add integration tests using a test Redis instance/container.
+14. Add full end-to-end CI tests.
+15. Deploy API and worker independently.
+16. Add monitoring and alerting.
+17. Create operational runbooks.
+
+---
+
+## 36. Instructor Assessment
+
+From an instructor/backend-engineering perspective, the strongest learning outcomes were not the individual commands. They were the architectural decisions.
+
+### Strong evidence of growth
+
+- The system moved from synchronous assumptions to explicit asynchronous state.
+- The learner introduced `jobId` as a correlation mechanism.
+- Webhook authentication was implemented rather than assumed.
+- The exact raw body was preserved for signature verification.
+- Timing-safe comparison was used.
+- Redis/BullMQ replaced the in-memory queue.
+- Retry behavior was actually tested.
+- Duplicate events were tested.
+- Wrong-job events were tested.
+- Queue failure rollback was implemented.
+- Shared configuration was introduced.
+- Graceful shutdown was verified.
+- Git commits were used as an auditable progression of the work.
+
+### Engineering mindset demonstrated
+
+The project increasingly moved from:
+
+```text
+"Does the happy path work?"
+```
+
+toward:
+
+```text
+"What happens if the dependency fails, the event repeats,
+the event is wrong, the job is delayed, or the process stops?"
+```
+
+That is the most important backend engineering transition demonstrated by this lab.
+
+---
+
+## 37. Final Reflection
+
+The Meridian Pivot changed the project from a simple integration demo into a practical asynchronous systems exercise.
+
+The biggest lesson was that distributed systems require explicit thinking about time and failure.
+
+The API request happens now.
+
+The queue processes work later.
+
+The worker calls another component later still.
+
+The callback may be duplicated, delayed, rejected, or mismatched.
+
+The backend therefore needs explicit state, correlation, authentication, retries, idempotency, and observability.
+
+The final architecture captures that thinking.
+
+---
+
+## 38. Final Learning Summary
+
+By the end of the project, I learned:
+
+- how polling works and where it becomes inefficient
+- why webhooks are useful for event-driven integrations
+- how HMAC-SHA256 authenticates webhook payloads
+- why raw-body preservation matters
+- how timing-safe comparison is used
+- why asynchronous APIs should use `202 Accepted`
+- why `PENDING` is a business state
+- how UUID job IDs correlate asynchronous operations
+- how Redis and BullMQ provide a real queue architecture
+- how retry and backoff policies work
+- why failed jobs should remain observable
+- why duplicate delivery must be expected
+- how idempotent completion prevents repeated state transitions
+- why authentication and correlation solve different problems
+- how to handle queue submission failure with rollback
+- how to share configuration safely
+- how to keep secrets out of Git
+- how to diagnose whether Redis, API, or worker availability is the problem
+- how graceful shutdown improves operational safety
+- how Git history provides evidence of architectural progression
+- how to distinguish a strong prototype from a production-ready service
+
+---
+
+## 39. Final Status
+
+The SignalShelf backend is complete for the scope of the Meridian Pivot learning exercise.
+
+Final architecture:
+
+```text
+Client
+  ↓
+Express API
+  ↓
+BullMQ
+  ↓
+Redis
+  ↓
+BullMQ Worker
+  ↓
+HMAC-signed Webhook
+  ↓
+Signature + Correlation Verification
+  ↓
+CHECKED_IN
+```
+
+Final Git state:
+
+```text
+646df52 (HEAD -> main, origin/main) feat: finalize SignalShelf backend
+```
+
+Final working tree:
+
+```text
+nothing to commit, working tree clean
+```
+
+The backend is therefore ready to be presented as the completed Meridian Pivot implementation, with its remaining prototype limitations clearly documented.
+
+---
+
+# End of Learning Journal
