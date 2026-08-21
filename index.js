@@ -10,6 +10,12 @@ const app = express();
 
 const webhookSecret = process.env.WEBHOOK_SECRET;
 
+if (!webhookSecret) {
+    throw new Error(
+        'WEBHOOK_SECRET environment variable is required'
+    );
+}
+
 function verifyWebhookSignature(payload, signature) {
     if (!signature || !webhookSecret) {
         return false;
@@ -161,10 +167,31 @@ app.post('/webhooks/print-complete', (req, res) => {
     });
 });
 
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'ok',
+        service: 'signalshelf-event-lab',
+        queue: 'bullmq',
+        broker: 'redis'
+    });
+});
+
 app.use((req, res) => {
     res.status(404).send('Not Found');
 });
 
-app.listen(3000, () => {
+const server = app.listen(3000, () => {
     console.log('SignalShelf server is running');
 });
+
+async function shutdown(signal) {
+    console.log(`\nReceived ${signal}. Shutting down API server...`);
+
+    server.close(() => {
+        console.log('HTTP server closed successfully');
+        process.exit(0);
+    });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

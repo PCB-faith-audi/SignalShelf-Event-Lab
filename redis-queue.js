@@ -1,10 +1,8 @@
 import { Queue } from 'bullmq';
+import { redisConnection } from './redis-config.js';
 
 const printQueue = new Queue('print-jobs', {
-    connection: {
-        host: '127.0.0.1',
-        port: 6379
-    }
+    connection: redisConnection
 });
 
 export async function addPrintJob(job) {
@@ -29,6 +27,10 @@ export async function addPrintJob(job) {
     );
 
     return queuedJob;
+}
+
+export async function closePrintQueue() {
+    await printQueue.close();
 }
 
 export { printQueue };

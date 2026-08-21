@@ -15,7 +15,7 @@ This project was created to independently learn an unfamiliar backend concept: e
 - Webhook-style endpoints
 - Input validation
 - HTTP status codes
-- In-memory storage
+- Redis-backed asynchronous queue using BullMQ
 - Dynamic route parameters
 - Basic REST-style API design
 

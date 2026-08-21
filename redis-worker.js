@@ -1,10 +1,17 @@
 import { Worker } from 'bullmq';
 import dotenv from 'dotenv';
 import crypto from 'node:crypto';
+import { redisConnection } from './redis-config.js';
 
 dotenv.config();
 
 const webhookSecret = process.env.WEBHOOK_SECRET;
+
+if (!webhookSecret) {
+    throw new Error(
+        'WEBHOOK_SECRET environment variable is required'
+    );
+}
 
 function generateWebhookSignature(payload) {
     return crypto
@@ -60,10 +67,7 @@ const worker = new Worker(
         };
     },
     {
-        connection: {
-            host: '127.0.0.1',
-            port: 6379
-        }
+        connection: redisConnection
     }
 );
 
@@ -81,3 +85,15 @@ worker.on('failed', (job, error) => {
 });
 
 console.log('BullMQ printer worker is running');
+
+async function shutdown(signal) {
+    console.log(`\nReceived ${signal}. Shutting down worker...`);
+
+    await worker.close();
+
+    console.log('BullMQ worker closed successfully');
+    process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
